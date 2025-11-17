@@ -1,9 +1,10 @@
 -- -----------------------------------------------------
--- Healthcare Management System DBMS
--- This schema implements all tables and features from the synopsis.
+-- Healthcare Management System DBMS (CORRECTED ORDER)
+-- This schema fixes the foreign key dependency issue.
 -- -----------------------------------------------------
 
--- Drop existing tables if they exist to start fresh
+-- Drop tables in an order that respects dependencies (or just turn off checks)
+SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS SupportCalls;
 DROP TABLE IF EXISTS SupportGroups;
 DROP TABLE IF EXISTS Payments;
@@ -16,23 +17,54 @@ DROP TABLE IF EXISTS Rooms;
 DROP TABLE IF EXISTS Doctors;
 DROP TABLE IF EXISTS Patients;
 DROP TABLE IF EXISTS Users;
+SET FOREIGN_KEY_CHECKS = 1;
 
 -- -----------------------------------------------------
--- Table `Users`
--- REQUIRED FOR AUTHENTICATION & ROLE-BASED ACCESS
--- This table links a login to a specific Patient, Doctor, or Admin.
+-- Create tables with NO dependencies first
 -- -----------------------------------------------------
 CREATE TABLE Users (
   UserID INT AUTO_INCREMENT PRIMARY KEY,
   Username VARCHAR(100) NOT NULL UNIQUE,
-  Password VARCHAR(255) NOT NULL, -- In a real app, this MUST be a hashed password
+  Password VARCHAR(255) NOT NULL,
   Role ENUM('Patient', 'Doctor', 'Admin') NOT NULL,
-  -- LinkedID connects this user to their specific profile (PatientID or DoctorID)
-  LinkedID INT NULL 
+  LinkedID INT NULL
+);
+
+CREATE TABLE Doctors (
+  DoctorID INT AUTO_INCREMENT PRIMARY KEY,
+  Name VARCHAR(200) NOT NULL,
+  Specialization VARCHAR(200) NOT NULL,
+  Contact VARCHAR(20) NOT NULL UNIQUE
+);
+
+CREATE TABLE SupportGroups (
+  GroupID INT AUTO_INCREMENT PRIMARY KEY,
+  GroupName VARCHAR(200) NOT NULL,
+  Description TEXT,
+  MeetingTime VARCHAR(100)
 );
 
 -- -----------------------------------------------------
--- Table `Patients`
+-- Create tables that depend on the first set
+-- -----------------------------------------------------
+CREATE TABLE Nurses (
+  NurseID INT AUTO_INCREMENT PRIMARY KEY,
+  Name VARCHAR(200) NOT NULL,
+  Contact VARCHAR(20) NOT NULL,
+  AssignedDoctorID INT,
+  FOREIGN KEY (AssignedDoctorID) REFERENCES Doctors(DoctorID)
+);
+
+CREATE TABLE WardBoys (
+  WardBoyID INT AUTO_INCREMENT PRIMARY KEY,
+  Name VARCHAR(200) NOT NULL,
+  Contact VARCHAR(20) NOT NULL,
+  AssignedDoctorID INT,
+  FOREIGN KEY (AssignedDoctorID) REFERENCES Doctors(DoctorID)
+);
+
+-- -----------------------------------------------------
+-- Create Patients table (without the Rooms FK)
 -- -----------------------------------------------------
 CREATE TABLE Patients (
   PatientID INT AUTO_INCREMENT PRIMARY KEY,
@@ -42,22 +74,11 @@ CREATE TABLE Patients (
   Address VARCHAR(500),
   Contact VARCHAR(20) NOT NULL UNIQUE,
   RegistrationDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CurrentRoomID INT NULL, -- Patient's currently assigned room
-  FOREIGN KEY (CurrentRoomID) REFERENCES Rooms(RoomID)
+  CurrentRoomID INT NULL -- We will add the FK for this later
 );
 
 -- -----------------------------------------------------
--- Table `Doctors`
--- -----------------------------------------------------
-CREATE TABLE Doctors (
-  DoctorID INT AUTO_INCREMENT PRIMARY KEY,
-  Name VARCHAR(200) NOT NULL,
-  Specialization VARCHAR(200) NOT NULL,
-  Contact VARCHAR(20) NOT NULL UNIQUE
-);
-
--- -----------------------------------------------------
--- Table `Rooms`
+-- Create Rooms table (this will work now)
 -- -----------------------------------------------------
 CREATE TABLE Rooms (
   RoomID INT AUTO_INCREMENT PRIMARY KEY,
@@ -68,29 +89,14 @@ CREATE TABLE Rooms (
 );
 
 -- -----------------------------------------------------
--- Table `Nurses`
+-- NOW, add the missing Foreign Key to Patients
 -- -----------------------------------------------------
-CREATE TABLE Nurses (
-  NurseID INT AUTO_INCREMENT PRIMARY KEY,
-  Name VARCHAR(200) NOT NULL,
-  Contact VARCHAR(20) NOT NULL,
-  AssignedDoctorID INT,
-  FOREIGN KEY (AssignedDoctorID) REFERENCES Doctors(DoctorID)
-);
+ALTER TABLE Patients
+ADD CONSTRAINT fk_patients_room
+FOREIGN KEY (CurrentRoomID) REFERENCES Rooms(RoomID);
 
 -- -----------------------------------------------------
--- Table `WardBoys`
--- -----------------------------------------------------
-CREATE TABLE WardBoys (
-  WardBoyID INT AUTO_INCREMENT PRIMARY KEY,
-  Name VARCHAR(200) NOT NULL,
-  Contact VARCHAR(20) NOT NULL,
-  AssignedDoctorID INT,
-  FOREIGN KEY (AssignedDoctorID) REFERENCES Doctors(DoctorID)
-);
-
--- -----------------------------------------------------
--- Table `Diagnoses` (M:N between Patients and Doctors)
+-- Create all remaining tables that depend on Patients
 -- -----------------------------------------------------
 CREATE TABLE Diagnoses (
   DiagnosisID INT AUTO_INCREMENT PRIMARY KEY,
@@ -103,22 +109,14 @@ CREATE TABLE Diagnoses (
   FOREIGN KEY (DoctorID) REFERENCES Doctors(DoctorID)
 );
 
--- -----------------------------------------------------
--- Table `Assignments` (M:N between Staff and Patients)
--- -----------------------------------------------------
 CREATE TABLE Assignments (
   AssignmentID INT AUTO_INCREMENT PRIMARY KEY,
   StaffID INT NOT NULL, -- This can be a NurseID or WardBoyID
   PatientID INT NOT NULL,
   Role ENUM('Nurse', 'WardBoy') NOT NULL,
   FOREIGN KEY (PatientID) REFERENCES Patients(PatientID)
-  -- Note: We can't add a direct FK for StaffID as it refers to two tables.
-  -- This would be enforced at the application layer or with triggers.
 );
 
--- -----------------------------------------------------
--- Table `Payments`
--- -----------------------------------------------------
 CREATE TABLE Payments (
   PaymentID INT AUTO_INCREMENT PRIMARY KEY,
   PatientID INT NOT NULL,
@@ -129,9 +127,6 @@ CREATE TABLE Payments (
   FOREIGN KEY (PatientID) REFERENCES Patients(PatientID)
 );
 
--- -----------------------------------------------------
--- Table `EmergencyCare`
--- -----------------------------------------------------
 CREATE TABLE EmergencyCare (
   EmergencyID INT AUTO_INCREMENT PRIMARY KEY,
   PatientID INT NOT NULL,
@@ -142,19 +137,6 @@ CREATE TABLE EmergencyCare (
   FOREIGN KEY (DoctorID) REFERENCES Doctors(DoctorID)
 );
 
--- -----------------------------------------------------
--- Table `SupportGroups`
--- -----------------------------------------------------
-CREATE TABLE SupportGroups (
-  GroupID INT AUTO_INCREMENT PRIMARY KEY,
-  GroupName VARCHAR(200) NOT NULL,
-  Description TEXT,
-  MeetingTime VARCHAR(100)
-);
-
--- -----------------------------------------------------
--- Table `SupportCalls`
--- -----------------------------------------------------
 CREATE TABLE SupportCalls (
   CallID INT AUTO_INCREMENT PRIMARY KEY,
   PatientID INT NOT NULL,
@@ -163,9 +145,8 @@ CREATE TABLE SupportCalls (
   FOREIGN KEY (PatientID) REFERENCES Patients(PatientID)
 );
 
-
 -- -----------------------------------------------------
--- ADVANCED DBMS FEATURES (as per synopsis)
+-- ADVANCED DBMS FEATURES (These will work now)
 -- -----------------------------------------------------
 
 -- 1. VIEW: For admitted patients
@@ -178,9 +159,9 @@ SELECT
     R.RoomType,
     D.Name AS DoctorName
 FROM Patients P
-JOIN Rooms R ON P.CurrentRoomID = R.RoomID
-JOIN Diagnoses Diag ON P.PatientID = Diag.PatientID
-JOIN Doctors D ON Diag.DoctorID = D.DoctorID
+LEFT JOIN Rooms R ON P.CurrentRoomID = R.RoomID
+LEFT JOIN Diagnoses Diag ON P.PatientID = Diag.PatientID
+LEFT JOIN Doctors D ON Diag.DoctorID = D.DoctorID
 WHERE R.Status = 'Occupied'
 GROUP BY P.PatientID;
 
@@ -217,7 +198,6 @@ END$$
 DELIMITER ;
 
 -- 4. TRIGGER: Automatically update room status when a patient is discharged
--- We'll base "discharge" on the patient's room being set to NULL
 DELIMITER $$
 CREATE TRIGGER trg_after_patient_discharge
 AFTER UPDATE ON Patients
@@ -230,16 +210,4 @@ BEGIN
         WHERE RoomID = OLD.CurrentRoomID;
     END IF;
 END$$
-DELIMITER ;
-
--- 5. USER MANAGEMENT (DCL): Example comments
--- CREATE USER 'admin_user'@'localhost' IDENTIFIED BY 'password';
--- GRANT ALL PRIVILEGES ON HealthcareDB.* TO 'admin_user'@'localhost';
-
--- CREATE USER 'doctor_user'@'localhost' IDENTIFIED BY 'password';
--- GRANT SELECT, INSERT, UPDATE ON HealthcareDB.Diagnoses TO 'doctor_user'@'localhost';
--- GRANT SELECT ON HealthcareDB.Patients TO 'doctor_user'@'localhost';
-
--- CREATE USER 'patient_user'@'localhost' IDENTIFIED BY 'password';
--- GRANT SELECT ON HealthcareDB.Diagnoses TO 'patient_user'@'localhost' WHERE PatientID = [linked_id];
--- (More complex row-level security is often handled at the application layer)
+DELIMITTER ;
