@@ -1,6 +1,7 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
+const bcrypt = require('bcrypt'); 
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -13,169 +14,111 @@ app.use(express.json());
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'Anant@2021', // !! CHANGE THIS
+    password: process.env.DB_PASSWORD || 'Anant@2021', // !! Verify your password
     database: process.env.DB_NAME || 'HealthcareDB'
 };
 
 const pool = mysql.createPool(dbConfig);
+const saltRounds = 10; 
 
 // -----------------------------------------------------
 // --- AUTHENTICATION API ---
 // -----------------------------------------------------
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-
-    if (!username || !password) {
-        return res.status(400).json({ success: false, message: 'Username and password are required' });
-    }
+    if (!username || !password) return res.status(400).json({ success: false, message: 'Username and password required' });
 
     try {
-        const query = 'SELECT UserID, Role, LinkedID FROM Users WHERE Username = ? AND Password = ?';
-        const [users] = await pool.query(query, [username, password]);
+        const [users] = await pool.query('SELECT UserID, Role, LinkedID, Password FROM Users WHERE Username = ?', [username]);
+        if (users.length === 0) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-        if (users.length > 0) {
-            const user = users[0];
-            res.json({
-                success: true,
-                message: 'Login successful',
-                role: user.Role,
-                id: user.LinkedID,
-                userId: user.UserID
-            });
+        const user = users[0];
+        const match = await bcrypt.compare(password, user.Password);
+        
+        if (match) {
+            res.json({ success: true, role: user.Role, id: user.LinkedID, userId: user.UserID });
         } else {
-            res.status(401).json({ success: false, message: 'Invalid username or password' });
+            res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
     } catch (err) {
-        console.error("Login error:", err);
-        res.status(500).json({ success: false, message: 'An error occurred during login' });
+        res.status(500).json({ success: false, message: 'Login error' });
     }
 });
 
-// -----------------------------------------------------
-// --- PATIENT REGISTRATION API (with TCL) ---
-// -----------------------------------------------------
 app.post('/api/register', async (req, res) => {
     const { name, age, gender, address, contact, username, password } = req.body;
-
-    if (!name || !age || !gender || !contact || !username || !password) {
-        return res.status(400).json({ success: false, message: 'All fields are required' });
-    }
+    if (!name || !username || !password) return res.status(400).json({ success: false, message: 'Missing fields' });
 
     let connection;
     try {
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
         connection = await pool.getConnection();
         await connection.beginTransaction();
 
-        const patientQuery = 'INSERT INTO Patients (Name, Age, Gender, Address, Contact) VALUES (?, ?, ?, ?, ?)';
-        const [patientResult] = await connection.query(patientQuery, [name, age, gender, address, contact]);
-        
-        const newPatientID = patientResult.insertId;
-
-        const userQuery = 'INSERT INTO Users (Username, Password, Role, LinkedID) VALUES (?, ?, ?, ?)';
-        await connection.query(userQuery, [username, password, 'Patient', newPatientID]);
+        const [res1] = await connection.query('INSERT INTO Patients (Name, Age, Gender, Address, Contact) VALUES (?, ?, ?, ?, ?)', [name, age, gender, address, contact]);
+        const newPatientID = res1.insertId;
+        await connection.query('INSERT INTO Users (Username, Password, Role, LinkedID) VALUES (?, ?, ?, ?)', [username, hashedPassword, 'Patient', newPatientID]);
 
         await connection.commit();
-
-        res.status(201).json({ 
-            success: true, 
-            message: 'Patient registered successfully. Please log in.',
-            patientId: newPatientID
-        });
-
+        res.status(201).json({ success: true, message: 'Registration successful. Please log in.' });
     } catch (err) {
-        if (connection) {
-            await connection.rollback();
-        }
-        console.error("Registration error:", err);
-        if (err.code === 'ER_DUP_ENTRY') {
-            return res.status(409).json({ success: false, message: 'Username or contact number already exists.' });
-        }
-        res.status(500).json({ success: false, message: 'An error occurred during registration.' });
+        if (connection) await connection.rollback();
+        res.status(500).json({ success: false, message: 'Registration failed' });
     } finally {
-        if (connection) {
-            connection.release();
-        }
+        if (connection) connection.release();
     }
 });
-
 
 // -----------------------------------------------------
 // --- ADMIN ROUTES ---
 // -----------------------------------------------------
-
-// --- Room Management ---
 app.get('/api/admin/rooms', async (req, res) => {
     try {
         const [allRooms] = await pool.query("SELECT * FROM Rooms ORDER BY RoomID");
-        const [occupiedRoomsDetails] = await pool.query("SELECT * FROM v_admitted_patients");
-        res.json({ success: true, allRooms, occupiedRoomsDetails });
-    } catch (err) {
-        console.error("Error fetching room data:", err);
-        res.status(500).json({ success: false, message: 'Server error fetching room data' });
-    }
+        const [occupied] = await pool.query("SELECT * FROM v_admitted_patients");
+        res.json({ success: true, allRooms, occupiedRoomsDetails: occupied });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching rooms' }); }
 });
 
 app.post('/api/admin/rooms', async (req, res) => {
     const { roomType, status } = req.body;
     try {
-        const query = "INSERT INTO Rooms (RoomType, Status) VALUES (?, ?)";
-        await pool.query(query, [roomType, status]);
-        res.status(201).json({ success: true, message: 'Room created successfully!' });
-    } catch (err) {
-        console.error("Error creating room:", err);
-        res.status(500).json({ success: false, message: 'Server error creating room' });
-    }
+        await pool.query("INSERT INTO Rooms (RoomType, Status) VALUES (?, ?)", [roomType, status]);
+        res.status(201).json({ success: true, message: 'Room created' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error creating room' }); }
 });
 
 app.get('/api/admin/unassigned-patients', async (req, res) => {
     try {
-        const query = "SELECT PatientID, Name FROM Patients WHERE CurrentRoomID IS NULL";
-        const [patients] = await pool.query(query);
+        const [patients] = await pool.query("SELECT PatientID, Name FROM Patients WHERE CurrentRoomID IS NULL");
         res.json({ success: true, patients });
-    } catch (err) {
-        console.error("Error fetching unassigned patients:", err);
-        res.status(500).json({ success: false, message: 'Server error fetching patients' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching patients' }); }
 });
 
 app.post('/api/admin/admit', async (req, res) => {
     const { patientId, roomId } = req.body;
     try {
-        const query = "CALL sp_admit_patient(?, ?)";
-        await pool.query(query, [patientId, roomId]);
-        res.json({ success: true, message: 'Patient admitted successfully!' });
-    } catch (err) {
-        console.error("Error admitting patient:", err);
-        res.status(500).json({ success: false, message: 'Server error during admission' });
-    }
+        await pool.query("CALL sp_admit_patient(?, ?)", [patientId, roomId]);
+        res.json({ success: true, message: 'Patient admitted' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Admission failed' }); }
 });
 
 app.post('/api/admin/discharge', async (req, res) => {
     const { patientId } = req.body;
     try {
-        const query = "UPDATE Patients SET CurrentRoomID = NULL WHERE PatientID = ?";
-        const [result] = await pool.query(query, [patientId]);
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Patient not found or not admitted' });
-        }
-        res.json({ success: true, message: 'Patient discharged successfully! Room is now available.' });
-    } catch (err) {
-        console.error("Error discharging patient:", err);
-        res.status(500).json({ success: false, message: 'Server error during discharge' });
-    }
+        const [res1] = await pool.query("UPDATE Patients SET CurrentRoomID = NULL WHERE PatientID = ?", [patientId]);
+        if (res1.affectedRows === 0) return res.status(404).json({ success: false, message: 'Patient not found' });
+        res.json({ success: true, message: 'Patient discharged' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Discharge failed' }); }
 });
 
-// --- Staff Management ---
 app.get('/api/admin/staff', async (req, res) => {
     try {
         const [doctors] = await pool.query("SELECT DoctorID, Name, Specialization FROM Doctors");
-        const [nurses] = await pool.query("SELECT NurseID, Name, AssignedDoctorID FROM Nurses");
-        const [wardboys] = await pool.query("SELECT WardBoyID, Name, AssignedDoctorID FROM WardBoys");
+        const [nurses] = await pool.query("SELECT NurseID, Name FROM Nurses");
+        const [wardboys] = await pool.query("SELECT WardBoyID, Name FROM WardBoys");
         res.json({ success: true, doctors, nurses, wardboys });
-    } catch (err) {
-        console.error("Error fetching staff:", err);
-        res.status(500).json({ success: false, message: 'Server error fetching staff' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching staff' }); }
 });
 
 app.post('/api/admin/staff', async (req, res) => {
@@ -184,41 +127,26 @@ app.post('/api/admin/staff', async (req, res) => {
     try {
         connection = await pool.getConnection();
         await connection.beginTransaction();
-        
+        const hashed = await bcrypt.hash(password, saltRounds);
         let linkedId;
-        
+
         if (role === 'Doctor') {
-            const [result] = await connection.query(
-                'INSERT INTO Doctors (Name, Specialization, Contact) VALUES (?, ?, ?)',
-                [name, specialization, contact]
-            );
-            linkedId = result.insertId;
+            const [res1] = await connection.query('INSERT INTO Doctors (Name, Specialization, Contact) VALUES (?, ?, ?)', [name, specialization, contact]);
+            linkedId = res1.insertId;
         } else if (role === 'Nurse') {
-            const [result] = await connection.query('INSERT INTO Nurses (Name, Contact) VALUES (?, ?)', [name, contact]);
-            linkedId = result.insertId;
+            const [res1] = await connection.query('INSERT INTO Nurses (Name, Contact) VALUES (?, ?)', [name, contact]);
+            linkedId = res1.insertId;
         } else if (role === 'WardBoy') {
-            const [result] = await connection.query('INSERT INTO WardBoys (Name, Contact) VALUES (?, ?)', [name, contact]);
-            linkedId = result.insertId;
-        } else {
-            throw new Error('Invalid staff role');
+            const [res1] = await connection.query('INSERT INTO WardBoys (Name, Contact) VALUES (?, ?)', [name, contact]);
+            linkedId = res1.insertId;
         }
 
-        // Create the user login
-        await connection.query(
-            'INSERT INTO Users (Username, Password, Role, LinkedID) VALUES (?, ?, ?, ?)',
-            [username, password, role, linkedId]
-        );
-
+        await connection.query('INSERT INTO Users (Username, Password, Role, LinkedID) VALUES (?, ?, ?, ?)', [username, hashed, role, linkedId]);
         await connection.commit();
-        res.status(201).json({ success: true, message: 'Staff member registered successfully' });
-        
+        res.status(201).json({ success: true, message: 'Staff registered' });
     } catch (err) {
         if (connection) await connection.rollback();
-        console.error("Error registering staff:", err);
-        if (err.code === 'ER_DUP_ENTRY') {
-            return res.status(409).json({ success: false, message: 'Username or contact number already exists.' });
-        }
-        res.status(500).json({ success: false, message: 'Server error registering staff' });
+        res.status(500).json({ success: false, message: 'Staff registration failed' });
     } finally {
         if (connection) connection.release();
     }
@@ -228,227 +156,203 @@ app.get('/api/admin/patients', async (req, res) => {
     try {
         const [patients] = await pool.query("SELECT PatientID, Name FROM Patients");
         res.json({ success: true, patients });
-    } catch (err) {
-        console.error("Error fetching all patients:", err);
-        res.status(500).json({ success: false, message: 'Server error fetching patients' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching patients' }); }
 });
 
 app.post('/api/admin/assignments', async (req, res) => {
     const { staffId, patientId, role } = req.body;
     try {
-        await pool.query(
-            'INSERT INTO Assignments (StaffID, PatientID, Role) VALUES (?, ?, ?)',
-            [staffId, patientId, role]
-        );
-        res.status(201).json({ success: true, message: 'Staff assigned successfully' });
-    } catch (err) {
-        console.error("Error assigning staff:", err);
-        res.status(500).json({ success: false, message: 'Server error assigning staff' });
-    }
+        await pool.query('INSERT INTO Assignments (StaffID, PatientID, Role) VALUES (?, ?, ?)', [staffId, patientId, role]);
+        res.json({ success: true, message: 'Staff assigned' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Assignment failed' }); }
 });
 
-// --- Billing Management ---
 app.get('/api/admin/billing', async (req, res) => {
     try {
-        // Use the view for pending payments
         const [pending] = await pool.query("SELECT * FROM v_pending_payments");
         res.json({ success: true, pending });
-    } catch (err) {
-        console.error("Error fetching pending bills:", err);
-        res.status(500).json({ success: false, message: 'Server error fetching bills' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching bills' }); }
 });
 
 app.post('/api/admin/billing', async (req, res) => {
     const { patientId, amount, paymentMode } = req.body;
     try {
-        await pool.query(
-            'INSERT INTO Payments (PatientID, Amount, PaymentMode, Status) VALUES (?, ?, ?, ?)',
-            [patientId, amount, paymentMode, 'Pending']
-        );
-        res.status(201).json({ success: true, message: 'Bill created successfully' });
-    } catch (err) {
-        console.error("Error creating bill:", err);
-        res.status(500).json({ success: false, message: 'Server error creating bill' });
-    }
+        await pool.query('INSERT INTO Payments (PatientID, Amount, PaymentMode, Status) VALUES (?, ?, ?, "Pending")', [patientId, amount, paymentMode]);
+        res.json({ success: true, message: 'Bill created' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Bill creation failed' }); }
 });
 
-// --- Support & Emergency ---
 app.get('/api/support-groups', async (req, res) => {
     try {
         const [groups] = await pool.query("SELECT * FROM SupportGroups");
         res.json({ success: true, groups });
-    } catch (err) {
-        console.error("Error fetching support groups:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching groups' }); }
 });
 
 app.post('/api/admin/support-groups', async (req, res) => {
     const { groupName, description, meetingTime } = req.body;
     try {
-        await pool.query(
-            'INSERT INTO SupportGroups (GroupName, Description, MeetingTime) VALUES (?, ?, ?)',
-            [groupName, description, meetingTime]
-        );
-        res.status(201).json({ success: true, message: 'Support group created' });
-    } catch (err) {
-        console.error("Error creating support group:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+        await pool.query('INSERT INTO SupportGroups (GroupName, Description, MeetingTime) VALUES (?, ?, ?)', [groupName, description, meetingTime]);
+        res.json({ success: true, message: 'Group created' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Creation failed' }); }
+});
+
+app.get('/api/admin/support-calls', async (req, res) => {
+    try {
+        const query = `
+            SELECT SC.CallID, SC.CallDetails, SC.CallDate, P.Name as PatientName 
+            FROM SupportCalls SC 
+            JOIN Patients P ON SC.PatientID = P.PatientID 
+            ORDER BY SC.CallDate DESC
+        `;
+        const [calls] = await pool.query(query);
+        res.json({ success: true, calls });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching logs' }); }
 });
 
 app.post('/api/admin/support-calls', async (req, res) => {
     const { patientId, details } = req.body;
     try {
-        await pool.query(
-            'INSERT INTO SupportCalls (PatientID, CallDetails, CallDate) VALUES (?, ?, NOW())',
-            [patientId, details]
-        );
-        res.status(201).json({ success: true, message: 'Support call logged' });
-    } catch (err) {
-        console.error("Error logging call:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+        await pool.query('INSERT INTO SupportCalls (PatientID, CallDetails, CallDate) VALUES (?, ?, NOW())', [patientId, details]);
+        res.json({ success: true, message: 'Call logged' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Logging failed' }); }
 });
 
 app.post('/api/admin/emergency', async (req, res) => {
     const { patientId, doctorId, details } = req.body;
     try {
-        await pool.query(
-            'INSERT INTO EmergencyCare (PatientID, DoctorID, Details, AdmissionDate) VALUES (?, ?, ?, NOW())',
-            [patientId, doctorId, details]
-        );
-        res.status(D01).json({ success: true, message: 'Emergency case logged' });
-    } catch (err) {
-        console.error("Error logging emergency:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+        await pool.query('INSERT INTO EmergencyCare (PatientID, DoctorID, Details, AdmissionDate) VALUES (?, ?, ?, NOW())', [patientId, doctorId, details]);
+        res.json({ success: true, message: 'Emergency logged' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Emergency logging failed' }); }
 });
 
 // -----------------------------------------------------
 // --- DOCTOR ROUTES ---
 // -----------------------------------------------------
-
 app.get('/api/doctor/patients/:doctorId', async (req, res) => {
     const { doctorId } = req.params;
     try {
-        const query = `
-            SELECT DISTINCT
-                P.PatientID, P.Name, P.Age, P.Gender, P.Contact
-            FROM Patients P
-            JOIN Diagnoses D ON P.PatientID = D.PatientID
-            WHERE D.DoctorID = ?
-            ORDER BY P.Name;
-        `;
+        const query = `SELECT DISTINCT P.PatientID, P.Name, P.Age, P.Gender, P.Contact FROM Patients P JOIN Diagnoses D ON P.PatientID = D.PatientID WHERE D.DoctorID = ? ORDER BY P.Name`;
         const [patients] = await pool.query(query, [doctorId]);
-        res.json({ success: true, patients: patients });
-    } catch (err) {
-        console.error("Error fetching doctor's patients:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+        res.json({ success: true, patients });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching patients' }); }
 });
 
 app.get('/api/doctor/patient-history/:patientId', async (req, res) => {
     const { patientId } = req.params;
     try {
         const [patient] = await pool.query("SELECT * FROM Patients WHERE PatientID = ?", [patientId]);
-        const [diagnoses] = await pool.query(
-            "SELECT D.*, Doc.Name as DoctorName FROM Diagnoses D JOIN Doctors Doc ON D.DoctorID = Doc.DoctorID WHERE D.PatientID = ? ORDER BY D.DiagnosisDate DESC",
-            [patientId]
-        );
+        const [diagnoses] = await pool.query("SELECT D.*, Doc.Name as DoctorName, Doc.Specialization FROM Diagnoses D JOIN Doctors Doc ON D.DoctorID = Doc.DoctorID WHERE D.PatientID = ? ORDER BY D.DiagnosisDate DESC", [patientId]);
         res.json({ success: true, patient: patient[0], diagnoses });
-    } catch (err) {
-        console.error("Error fetching patient history:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching history' }); }
 });
 
+// --- MODIFIED: Add Diagnosis AND Complete Appointment ---
 app.post('/api/doctor/diagnoses', async (req, res) => {
-    const { patientId, doctorId, disease, prescription } = req.body;
+    const { patientId, doctorId, disease, prescription, appointmentId } = req.body;
+    let connection;
     try {
-        await pool.query(
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Add the Diagnosis record
+        await connection.query(
             'INSERT INTO Diagnoses (PatientID, DoctorID, Disease, Prescription, DiagnosisDate) VALUES (?, ?, ?, ?, NOW())',
             [patientId, doctorId, disease, prescription]
         );
-        res.status(201).json({ success: true, message: 'Diagnosis added successfully' });
+
+        // 2. If an appointment ID was passed, mark it as Completed
+        if (appointmentId) {
+            await connection.query(
+                "UPDATE Appointments SET Status = 'Completed' WHERE AppointmentID = ?",
+                [appointmentId]
+            );
+        }
+
+        await connection.commit();
+        res.status(201).json({ success: true, message: 'Consultation recorded and appointment completed.' });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error("Error adding diagnosis:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
+        res.status(500).json({ success: false, message: 'Failed to record consultation' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
 // -----------------------------------------------------
 // --- PATIENT ROUTES ---
 // -----------------------------------------------------
-
 app.get('/api/patient/history/:patientId', async (req, res) => {
     const { patientId } = req.params;
     try {
-        const [diagnoses] = await pool.query(
-            "SELECT D.*, Doc.Name as DoctorName, Doc.Specialization FROM Diagnoses D JOIN Doctors Doc ON D.DoctorID = Doc.DoctorID WHERE D.PatientID = ? ORDER BY D.DiagnosisDate DESC",
-            [patientId]
-        );
+        const [diagnoses] = await pool.query("SELECT D.*, Doc.Name as DoctorName, Doc.Specialization FROM Diagnoses D JOIN Doctors Doc ON D.DoctorID = Doc.DoctorID WHERE D.PatientID = ? ORDER BY D.DiagnosisDate DESC", [patientId]);
         res.json({ success: true, diagnoses });
-    } catch (err) {
-        console.error("Error fetching patient history:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching history' }); }
 });
 
 app.get('/api/patient/billing/:patientId', async (req, res) => {
     const { patientId } = req.params;
     try {
-        const [payments] = await pool.query(
-            "SELECT * FROM Payments WHERE PatientID = ? ORDER BY PaymentDate DESC",
-            [patientId]
-        );
+        const [payments] = await pool.query("SELECT * FROM Payments WHERE PatientID = ? ORDER BY PaymentDate DESC", [patientId]);
         res.json({ success: true, payments });
-    } catch (err) {
-        console.error("Error fetching patient billing:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching billing' }); }
 });
 
-// --- NEW: Make a Payment (TCL) ---
 app.post('/api/patient/pay', async (req, res) => {
     const { paymentId, patientId } = req.body;
-
-    let connection;
     try {
-        connection = await pool.getConnection();
-        await connection.beginTransaction();
-
-        // Update the payment status and date
-        const query = "UPDATE Payments SET Status = 'Completed', PaymentDate = NOW() WHERE PaymentID = ? AND PatientID = ? AND Status = 'Pending'";
-        const [result] = await connection.query(query, [paymentId, patientId]);
-
-        if (result.affectedRows === 0) {
-            throw new Error('Payment not found or already completed.');
-        }
-
-        // You could add other actions here, like updating an "accounts" table
-        // For now, we just commit the change.
-        await connection.commit();
-
-        res.json({ success: true, message: 'Payment successful!' });
-
-    } catch (err) {
-        if (connection) {
-            await connection.rollback();
-        }
-        console.error("Payment error:", err);
-        res.status(500).json({ success: false, message: err.message || 'Payment failed.' });
-    } finally {
-        if (connection) {
-            connection.release();
-        }
-    }
+        const [res1] = await pool.query("UPDATE Payments SET Status = 'Completed', PaymentDate = NOW() WHERE PaymentID = ? AND PatientID = ? AND Status = 'Pending'", [paymentId, patientId]);
+        if (res1.affectedRows === 0) return res.status(404).json({ success: false, message: 'Payment not found or complete' });
+        res.json({ success: true, message: 'Payment successful' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Payment failed' }); }
 });
 
+// -----------------------------------------------------
+// --- APPOINTMENT ROUTES ---
+// -----------------------------------------------------
+app.get('/api/doctors', async (req, res) => {
+    try {
+        const [doctors] = await pool.query("SELECT DoctorID, Name, Specialization FROM Doctors");
+        res.json({ success: true, doctors });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching doctors' }); }
+});
 
-// --- Start Server ---
+app.post('/api/appointments', async (req, res) => {
+    const { patientId, doctorId, appointmentDate, reason } = req.body;
+    try {
+        await pool.query("INSERT INTO Appointments (PatientID, DoctorID, AppointmentDate, Reason, Status) VALUES (?, ?, ?, ?, 'Pending')", [patientId, doctorId, appointmentDate, reason]);
+        res.status(201).json({ success: true, message: 'Appointment booked' });
+    } catch (err) { res.status(500).json({ success: false, message: 'Booking failed' }); }
+});
+
+app.get('/api/appointments/doctor/:doctorId', async (req, res) => {
+    const { doctorId } = req.params;
+    try {
+        const query = `SELECT A.*, P.Name as PatientName, P.PatientID FROM Appointments A JOIN Patients P ON A.PatientID = P.PatientID WHERE A.DoctorID = ? ORDER BY A.AppointmentDate ASC`;
+        const [appointments] = await pool.query(query, [doctorId]);
+        res.json({ success: true, appointments });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching appointments' }); }
+});
+
+app.get('/api/appointments/patient/:patientId', async (req, res) => {
+    const { patientId } = req.params;
+    try {
+        const query = `SELECT A.*, D.Name as DoctorName, D.Specialization FROM Appointments A JOIN Doctors D ON A.DoctorID = D.DoctorID WHERE A.PatientID = ? ORDER BY A.AppointmentDate DESC`;
+        const [appointments] = await pool.query(query, [patientId]);
+        res.json({ success: true, appointments });
+    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching appointments' }); }
+});
+
+app.put('/api/appointments/:appointmentId', async (req, res) => {
+    const { appointmentId } = req.params;
+    const { status } = req.body;
+    try {
+        await pool.query("UPDATE Appointments SET Status = ? WHERE AppointmentID = ?", [status, appointmentId]);
+        res.json({ success: true, message: `Appointment ${status}` });
+    } catch (err) { res.status(500).json({ success: false, message: 'Update failed' }); }
+});
+
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });
