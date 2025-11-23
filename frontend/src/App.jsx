@@ -853,8 +853,12 @@ const DoctorSchedulePage = ({ user, onRecordConsultation }) => {
   useEffect(() => { fetch(); }, [fetch]);
 
   const update = async (id, status) => {
-    await apiFetch(`/api/appointments/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status})});
-    fetch();
+    try {
+        await apiFetch(`/api/appointments/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status})});
+        fetch();
+    } catch (e) {
+        alert(`Update failed: ${e.message}`);
+    }
   };
 
   return (
@@ -905,20 +909,57 @@ const DoctorPatientsPage = ({ user, onViewHistory }) => {
 const DoctorPatientHistoryPage = ({ user, patientId, appointmentId, showAddForm, onBack }) => {
   const [data, setData] = useState({ patient: null, diagnoses: [] });
   const [form, setForm] = useState({ disease: '', prescription: '' });
+  const [errorFetching, setErrorFetching] = useState(false); 
+  const [loading, setLoading] = useState(true);
 
-  const fetch = useCallback(async () => {
+  const fetchHistory = useCallback(async () => {
+    setLoading(true);
+    setErrorFetching(false); 
+    try {
       const d = await apiFetch(`/api/doctor/patient-history/${patientId}`);
       setData({ patient: d.patient, diagnoses: d.diagnoses });
+    } catch(e) {
+        console.error("Failed to fetch patient history:", e);
+        setErrorFetching(true); 
+    } finally {
+        setLoading(false);
+    }
   }, [patientId]);
-  useEffect(() => { fetch(); }, [fetch]);
+  
+  useEffect(() => { 
+    if(patientId) fetchHistory(); 
+  }, [fetchHistory, patientId]);
 
   const submit = async (e) => {
-      e.preventDefault();
-      await apiFetch('/api/doctor/diagnoses', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({patientId, doctorId: user.id, ...form, appointmentId}) });
-      if(appointmentId) onBack(); else { fetch(); setForm({disease:'', prescription:''}); }
+    e.preventDefault();
+    try {
+        await apiFetch('/api/doctor/diagnoses', { 
+            method:'POST', 
+            headers:{'Content-Type':'application/json'}, 
+            body:JSON.stringify({
+                patientId, 
+                doctorId: user.id, 
+                disease: form.disease, 
+                prescription: form.prescription, 
+                appointmentId
+            }) 
+        });
+        
+        alert('Consultation recorded successfully!');
+        
+        if(appointmentId) {
+            onBack(); 
+        } else { 
+            fetchHistory(); 
+            setForm({disease:'', prescription:''}); 
+        }
+    } catch (e) {
+        alert(`Consultation Failed: ${e.message}`); 
+    }
   };
 
-  if(!data.patient) return <Spinner />;
+  if(loading) return <Spinner />;
+  if(errorFetching || !data.patient) return <Alert type="error" message="Could not load patient details." />;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -938,16 +979,17 @@ const DoctorPatientHistoryPage = ({ user, patientId, appointmentId, showAddForm,
       )}
 
       <div className="space-y-4">
-        {data.diagnoses.map(d => (
+        {data.diagnoses && data.diagnoses.map(d => (
           <div key={d.DiagnosisID} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
             <div className="flex justify-between mb-2">
               <span className="font-bold text-slate-800">{d.Disease}</span>
               <span className="text-sm text-slate-400">{new Date(d.DiagnosisDate).toLocaleDateString()}</span>
             </div>
             <p className="text-slate-600">{d.Prescription}</p>
-            <div className="mt-2 text-xs text-teal-600 font-medium">Dr. {d.DoctorName}</div>
+            <div className="mt-2 text-xs text-teal-600 font-medium">Dr. {d.DoctorName || 'N/A'}</div> 
           </div>
         ))}
+        {data.diagnoses.length === 0 && <p className="text-slate-500 text-center">No medical history found.</p>}
       </div>
     </div>
   );
@@ -1144,6 +1186,26 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // --- LIFTED STATE ---
+  const [selectedPatientId, setSelectedPatientId] = useState(null);
+  const [selectedAppointmentId, setSelectedAppointmentId] = useState(null);
+  const [showDiagnosisForm, setShowDiagnosisForm] = useState(false);
+
+  // --- ACTIONS ---
+  const viewPatientHistory = (patientId) => { 
+      setSelectedPatientId(patientId); 
+      setSelectedAppointmentId(null); 
+      setShowDiagnosisForm(false); 
+      setPage('doctor-patient-history'); 
+  };
+
+  const recordConsultation = (patientId, appointmentId) => { 
+      setSelectedPatientId(patientId); 
+      setSelectedAppointmentId(appointmentId); 
+      setShowDiagnosisForm(true); 
+      setPage('doctor-patient-history'); 
+  };
+
   const handleLogin = async (username, password) => {
     setLoading(true); setError('');
     try {
@@ -1163,15 +1225,8 @@ export default function App() {
 
   if (!user) return <AuthPage onLogin={handleLogin} onRegister={handleRegister} error={error} appLoading={loading} />;
 
-  // Helper component to access user prop inside content area
-  const RenderContent = ({ user, page, setPage }) => {
-    const [selectedPatientId, setSelectedPatientId] = useState(null);
-    const [selectedAppointmentId, setSelectedAppointmentId] = useState(null);
-    const [showDiagnosisForm, setShowDiagnosisForm] = useState(false);
-
-    const viewPatientHistory = (patientId) => { setSelectedPatientId(patientId); setSelectedAppointmentId(null); setShowDiagnosisForm(false); setPage('doctor-patient-history'); };
-    const recordConsultation = (patientId, appointmentId) => { setSelectedPatientId(patientId); setSelectedAppointmentId(appointmentId); setShowDiagnosisForm(true); setPage('doctor-patient-history'); };
-
+  // --- RENDER CONTENT ---
+  const renderContent = () => {
     switch (page) {
         case 'dashboard': return <DashboardPage user={user} />;
         case 'appointments': return <PatientAppointmentsPage user={user} />;
@@ -1181,7 +1236,14 @@ export default function App() {
         case 'support': return user.role === 'Admin' ? <AdminSupportPage /> : <PatientSupportPageInternal user={user} />;
         case 'patients': return <DoctorPatientsPage user={user} onViewHistory={viewPatientHistory} />;
         case 'schedule': return <DoctorSchedulePage user={user} onRecordConsultation={recordConsultation} />;
-        case 'doctor-patient-history': return <DoctorPatientHistoryPage user={user} patientId={selectedPatientId} appointmentId={selectedAppointmentId} showAddForm={showDiagnosisForm} onBack={() => setPage(showDiagnosisForm ? 'schedule' : 'patients')} />;
+        case 'doctor-patient-history': 
+            return <DoctorPatientHistoryPage 
+                      user={user} 
+                      patientId={selectedPatientId} 
+                      appointmentId={selectedAppointmentId} 
+                      showAddForm={showDiagnosisForm} 
+                      onBack={() => setPage(showDiagnosisForm ? 'schedule' : 'patients')} 
+                   />;
         case 'staff': return <AdminStaffPage />;
         case 'rooms': return <AdminRoomPage />;
         case 'emergency': return <AdminEmergencyPage />;
@@ -1189,5 +1251,5 @@ export default function App() {
     }
   };
 
-  return <MainLayout user={user} onLogout={() => setUser(null)} page={page} setPage={setPage}><RenderContent user={user} page={page} setPage={setPage} /></MainLayout>;
+  return <MainLayout user={user} onLogout={() => setUser(null)} page={page} setPage={setPage}>{renderContent()}</MainLayout>;
 }

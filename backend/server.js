@@ -370,39 +370,136 @@ app.post('/api/admin/emergency', async (req, res) => {
 // --- DOCTOR & PATIENT & APPOINTMENT ROUTES ---
 // -----------------------------------------------------
 
+// --- DEBUG-ENHANCED DOCTOR ROUTES ---
+
+// 1. GET PATIENT LIST (Fixed to show patients with Appointments OR Diagnoses)
 app.get('/api/doctor/patients/:doctorId', async (req, res) => {
     const { doctorId } = req.params;
+    console.log(`[API] Fetching patients for Doctor ID: ${doctorId}`); // DEBUG LOG
     try {
-        const query = `SELECT DISTINCT P.PatientID, P.Name, P.Age, P.Gender, P.Contact FROM Patients P JOIN Diagnoses D ON P.PatientID = D.PatientID WHERE D.DoctorID = ? ORDER BY P.Name`;
-        const [patients] = await pool.query(query, [doctorId]);
+        const query = `
+            SELECT DISTINCT P.PatientID, P.Name, P.Age, P.Gender, P.Contact 
+            FROM Patients P
+            LEFT JOIN Diagnoses D ON P.PatientID = D.PatientID
+            LEFT JOIN Appointments A ON P.PatientID = A.PatientID
+            WHERE D.DoctorID = ? OR A.DoctorID = ?
+            ORDER BY P.Name
+        `;
+        const [patients] = await pool.query(query, [doctorId, doctorId]);
+        console.log(`[API] Found ${patients.length} patients`); // DEBUG LOG
         res.json({ success: true, patients });
-    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching patients' }); }
+    } catch (err) { 
+        console.error("[API Error] Fetch Patients:", err); 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
+// 2. GET PATIENT HISTORY (Fixed with LEFT JOIN)
 app.get('/api/doctor/patient-history/:patientId', async (req, res) => {
     const { patientId } = req.params;
+    console.log(`[API] Fetching history for Patient ID: ${patientId}`); // DEBUG LOG
     try {
         const [patient] = await pool.query("SELECT * FROM Patients WHERE PatientID = ?", [patientId]);
-        const [diagnoses] = await pool.query("SELECT D.*, Doc.Name as DoctorName, Doc.Specialization FROM Diagnoses D JOIN Doctors Doc ON D.DoctorID = Doc.DoctorID WHERE D.PatientID = ? ORDER BY D.DiagnosisDate DESC", [patientId]);
+        if (patient.length === 0) {
+            return res.status(404).json({ success: false, message: "Patient not found" });
+        }
+
+        const [diagnoses] = await pool.query(`
+            SELECT D.DiagnosisID, D.Disease, D.Prescription, D.DiagnosisDate, 
+                   Doc.Name as DoctorName, Doc.Specialization 
+            FROM Diagnoses D 
+            LEFT JOIN Doctors Doc ON D.DoctorID = Doc.DoctorID 
+            WHERE D.PatientID = ? 
+            ORDER BY D.DiagnosisDate DESC
+        `, [patientId]);
+        
+        console.log(`[API] Found ${diagnoses.length} history records`); // DEBUG LOG
         res.json({ success: true, patient: patient[0], diagnoses });
-    } catch (err) { res.status(500).json({ success: false, message: 'Error fetching history' }); }
+    } catch (err) { 
+        console.error("[API Error] Fetch History:", err); 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
+// 3. RECORD DIAGNOSIS (Transaction with detailed logging)
 app.post('/api/doctor/diagnoses', async (req, res) => {
     const { patientId, doctorId, disease, prescription, appointmentId } = req.body;
+    console.log("[API] Recording Diagnosis:", req.body); // DEBUG LOG
+
+    if (!patientId || !doctorId || !disease || !prescription) {
+        return res.status(400).json({ success: false, message: 'Missing fields' });
+    }
+
     let connection;
     try {
         connection = await pool.getConnection();
         await connection.beginTransaction();
-        await connection.query('INSERT INTO Diagnoses (PatientID, DoctorID, Disease, Prescription, DiagnosisDate) VALUES (?, ?, ?, ?, NOW())', [patientId, doctorId, disease, prescription]);
+
+        // Insert
+        await connection.query(
+            'INSERT INTO Diagnoses (PatientID, DoctorID, Disease, Prescription, DiagnosisDate) VALUES (?, ?, ?, ?, NOW())', 
+            [patientId, doctorId, disease, prescription]
+        );
+
+        // Update Appointment if exists
         if (appointmentId) {
             await connection.query("UPDATE Appointments SET Status = 'Completed' WHERE AppointmentID = ?", [appointmentId]);
         }
+        
+        await connection.commit();
+        console.log("[API] Diagnosis recorded successfully"); // DEBUG LOG
+        res.status(201).json({ success: true, message: 'Saved successfully' });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        console.error("[API Error] Record Diagnosis:", err); // CRITICAL DEBUG LOG
+        res.status(500).json({ success: false, message: 'Database error: ' + err.message });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// --- UPDATED DOCTOR DIAGNOSES ENDPOINT ---
+app.post('/api/doctor/diagnoses', async (req, res) => {
+    const { patientId, doctorId, disease, prescription, appointmentId } = req.body;
+    
+    // Basic validation to prevent immediate crashes
+    if (!patientId || !doctorId || !disease || !prescription) {
+        return res.status(400).json({ success: false, message: 'Missing required consultation details.' });
+    }
+
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        // 1. INSERT Diagnosis Record
+        const insertDiagnosisQuery = 
+            'INSERT INTO Diagnoses (PatientID, DoctorID, Disease, Prescription, DiagnosisDate) VALUES (?, ?, ?, ?, NOW())';
+        await connection.query(insertDiagnosisQuery, [patientId, doctorId, disease, prescription]);
+
+        // 2. UPDATE Appointment Status
+        if (appointmentId) {
+            const [updateRes] = await connection.query(
+                "UPDATE Appointments SET Status = 'Completed' WHERE AppointmentID = ?", 
+                [appointmentId]
+            );
+            // Optional: Check if appointment actually existed/updated
+            if (updateRes.affectedRows === 0) {
+                 // This is a warning, not a failure, but useful to log
+                 console.warn(`Diagnosis recorded, but appointment ${appointmentId} not found/updated.`);
+            }
+        }
+        
         await connection.commit();
         res.status(201).json({ success: true, message: 'Consultation recorded and appointment completed.' });
     } catch (err) {
-        if (connection) await connection.rollback();
-        res.status(500).json({ success: false, message: 'Failed to record consultation' });
+        if (connection) {
+             await connection.rollback();
+             // *** CRITICAL STEP: LOG THE DATABASE ERROR ***
+             console.error("Diagnosis Transaction Failed:", err); 
+        }
+        
+        // Return a generic 500 error to the client, but the terminal has the details.
+        res.status(500).json({ success: false, message: 'Failed to record consultation. Check server logs for details.' });
     } finally {
         if (connection) connection.release();
     }
